@@ -1,9 +1,9 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © Clarg
+// © Cem Yilmaz (Clarg)
 
 //@version=5
 strategy(
-     title               = "Clarg 5m Pro Strategy [Partial TP + Trailing]",
+     title               = "Clarg 5m Pro Strategy [Partial TP + Trailing + Webhook]",
      shorttitle          = "Clarg 5m Pro",
      overlay             = true,
      initial_capital     = 1000,
@@ -49,7 +49,10 @@ wkendSession        = input.session("0100-1400", "Weekend Trading Session", grou
 closeOutsideSession = input.bool(false, "Close Open Trades Outside Session", group = grp_time)
 showSessionBg       = input.bool(true, "Highlight Off-Session Hours", group = grp_time)
 
-grp_clr = "6. Visuals & Dashboard"
+grp_wh  = "6. Webhook & Bot Integration"
+webhookSecret = input.string("", "Webhook Secret / Token (Optional)", group = grp_wh)
+
+grp_clr = "7. Visuals & Dashboard"
 upColor    = input.color(#00ffbb, "Long / TP2 Color", group = grp_clr)
 tp1Color   = input.color(#00bcd4, "TP1 Color", group = grp_clr)
 downColor  = input.color(#ff1100, "Short / Initial SL Color", group = grp_clr)
@@ -88,7 +91,7 @@ longCondition  = ta.crossover(customRSI, -30) and allowLong and inSession
 shortCondition = ta.crossunder(customRSI, 30) and allowShort and inSession
 
 // ==========================================
-// 5. POSITION & RISK MANAGEMENT
+// 5. POSITION, RISK & WEBHOOK JSON MANAGEMENT
 // ==========================================
 var float entryPrice        = na
 var float activeSL          = na
@@ -111,7 +114,8 @@ if strategy.position_size == 0
     trailActivated    := false
 
 if closeOutsideSession and not inSession and strategy.position_size != 0
-    strategy.close_all(comment = "Session End")
+    sessionCloseMsg = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"SESSION_END_CLOSE","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","price":' + str.tostring(math.round_to_mintick(close)) + '}'
+    strategy.close_all(comment = "Session End", alert_message = sessionCloseMsg)
 
 // Long Entry
 if longCondition and strategy.position_size == 0
@@ -125,7 +129,9 @@ if longCondition and strategy.position_size == 0
     tp1Hit            := false
     trailActivated    := false
     entryClosedTrades := strategy.closedtrades
-    strategy.entry("Long", strategy.long)
+    tp1Json           = usePartialTP ? str.tostring(math.round_to_mintick(activeTP1)) : "null"
+    longEntryMsg      = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"ENTRY_LONG","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","price":' + str.tostring(math.round_to_mintick(close)) + ',"sl":' + str.tostring(math.round_to_mintick(activeSL)) + ',"tp1":' + tp1Json + ',"tp2":' + str.tostring(math.round_to_mintick(activeTP2)) + '}'
+    strategy.entry("Long", strategy.long, alert_message = longEntryMsg)
 
 // Short Entry
 if shortCondition and strategy.position_size == 0
@@ -139,7 +145,9 @@ if shortCondition and strategy.position_size == 0
     tp1Hit            := false
     trailActivated    := false
     entryClosedTrades := strategy.closedtrades
-    strategy.entry("Short", strategy.short)
+    tp1Json           = usePartialTP ? str.tostring(math.round_to_mintick(activeTP1)) : "null"
+    shortEntryMsg     = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"ENTRY_SHORT","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","price":' + str.tostring(math.round_to_mintick(close)) + ',"sl":' + str.tostring(math.round_to_mintick(activeSL)) + ',"tp1":' + tp1Json + ',"tp2":' + str.tostring(math.round_to_mintick(activeTP2)) + '}'
+    strategy.entry("Short", strategy.short, alert_message = shortEntryMsg)
 
 // Long Management
 if strategy.position_size > 0
@@ -154,9 +162,15 @@ if strategy.position_size > 0
         if trailActivated
             activeSL := math.max(activeSL, high - trailOffset)
 
+    slEventType = trailActivated ? "TRAILING_STOP_LONG" : (tp1Hit and moveSLToBE) ? "BREAKEVEN_LONG" : "STOP_LOSS_LONG"
+    tp1PriceStr = usePartialTP ? str.tostring(math.round_to_mintick(activeTP1)) : "null"
+    tp1LongMsg  = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"TP1_PARTIAL_LONG","close_pct":' + str.tostring(tp1QtyPct) + ',"symbol":"' + syminfo.ticker + '","price":' + tp1PriceStr + ',"new_sl":' + str.tostring(math.round_to_mintick(moveSLToBE ? entryPrice : activeSL)) + '}'
+    tp2LongMsg  = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"TP2_FINAL_LONG","symbol":"' + syminfo.ticker + '","price":' + str.tostring(math.round_to_mintick(activeTP2)) + '}'
+    slLongMsg   = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"' + slEventType + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(math.round_to_mintick(activeSL)) + '}'
+
     if usePartialTP and not tp1Hit
-        strategy.exit("Long TP1", "Long", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL)
-    strategy.exit("Long TP2", "Long", limit = activeTP2, stop = activeSL)
+        strategy.exit("Long TP1", "Long", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL, alert_profit = tp1LongMsg, alert_loss = slLongMsg)
+    strategy.exit("Long TP2", "Long", limit = activeTP2, stop = activeSL, alert_profit = tp2LongMsg, alert_loss = slLongMsg)
 
 // Short Management
 if strategy.position_size < 0
@@ -171,9 +185,15 @@ if strategy.position_size < 0
         if trailActivated
             activeSL := math.min(activeSL, low + trailOffset)
 
+    slEventType = trailActivated ? "TRAILING_STOP_SHORT" : (tp1Hit and moveSLToBE) ? "BREAKEVEN_SHORT" : "STOP_LOSS_SHORT"
+    tp1PriceStr = usePartialTP ? str.tostring(math.round_to_mintick(activeTP1)) : "null"
+    tp1ShortMsg = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"TP1_PARTIAL_SHORT","close_pct":' + str.tostring(tp1QtyPct) + ',"symbol":"' + syminfo.ticker + '","price":' + tp1PriceStr + ',"new_sl":' + str.tostring(math.round_to_mintick(moveSLToBE ? entryPrice : activeSL)) + '}'
+    tp2ShortMsg = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"TP2_FINAL_SHORT","symbol":"' + syminfo.ticker + '","price":' + str.tostring(math.round_to_mintick(activeTP2)) + '}'
+    slShortMsg  = '{"secret":"' + webhookSecret + '","strategy":"Clarg 5m Pro","event":"' + slEventType + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(math.round_to_mintick(activeSL)) + '}'
+
     if usePartialTP and not tp1Hit
-        strategy.exit("Short TP1", "Short", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL)
-    strategy.exit("Short TP2", "Short", limit = activeTP2, stop = activeSL)
+        strategy.exit("Short TP1", "Short", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL, alert_profit = tp1ShortMsg, alert_loss = slShortMsg)
+    strategy.exit("Short TP2", "Short", limit = activeTP2, stop = activeSL, alert_profit = tp2ShortMsg, alert_loss = slShortMsg)
 
 // ==========================================
 // 6. PLOTS & VISUALS
