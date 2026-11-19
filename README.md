@@ -7,8 +7,6 @@
 
 A 5-minute intraday and scalping trading strategy built in **Pine Script v5**. It combines a smoothed **Awesome Oscillator (AO) + RSI** momentum engine with dual institutional trend filters (**EMA 200 & VWAP**), dynamic **ATR-based risk management**, **Partial Take-Profit with automatic Breakeven**, customizable **weekday/weekend session windows**, and **JSON Webhook alerts** for automated execution.
 
-![Strategy Preview](assets/backtest-preview.png)
-
 ---
 
 ## Key Features
