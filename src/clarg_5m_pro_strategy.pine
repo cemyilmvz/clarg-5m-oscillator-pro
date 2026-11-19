@@ -1,1 +1,222 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Clarg
 
+//@version=5
+strategy(
+     title               = "Clarg 5m Pro Strategy [Partial TP + Trailing]",
+     shorttitle          = "Clarg 5m Pro",
+     overlay             = true,
+     initial_capital     = 1000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 100,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05
+ )
+
+// ==========================================
+// 1. INPUTS
+// ==========================================
+grp_osc = "1. Oscillator Settings (5m)"
+oscPeriod = input.int(14, "Oscillator Length", minval = 1, group = grp_osc)
+aoFast    = input.int(5, "AO Fast Period", minval = 1, group = grp_osc)
+aoSlow    = input.int(34, "AO Slow Period", minval = 1, group = grp_osc)
+
+grp_flt = "2. Trend Filter (EMA 200 & VWAP)"
+useFilter = input.bool(true, "Enable EMA 200 & VWAP Filter", group = grp_flt)
+emaLen    = input.int(200, "Trend EMA Length", minval = 1, group = grp_flt)
+showLines = input.bool(true, "Show EMA 200 & VWAP Lines", group = grp_flt)
+
+grp_rm  = "3. Partial Take-Profit & Risk Management"
+atrLen        = input.int(14, "ATR Length", minval = 1, group = grp_rm)
+slMult        = input.float(1.5, "Initial Stop-Loss ATR Multiplier", minval = 0.1, step = 0.1, group = grp_rm)
+usePartialTP  = input.bool(true, "Enable Partial Take-Profit", group = grp_rm)
+tp1Ratio      = input.float(1.5, "TP1 Risk/Reward Ratio", minval = 0.2, step = 0.1, group = grp_rm)
+tp1QtyPct     = input.int(50, "TP1 Close Position (%)", minval = 1, maxval = 99, step = 5, group = grp_rm)
+moveSLToBE    = input.bool(true, "Move Stop-Loss to Breakeven after TP1", group = grp_rm)
+tp2Ratio      = input.float(3.0, "TP2 (Final Target) Risk/Reward Ratio", minval = 0.5, step = 0.1, group = grp_rm)
+
+grp_tr  = "4. ATR Trailing Stop"
+useTrail      = input.bool(true, "Enable ATR Trailing Stop", group = grp_tr)
+trailActMult  = input.float(1.0, "Trailing Activation Threshold (ATR)", minval = 0.1, step = 0.1, group = grp_tr)
+trailDistMult = input.float(1.2, "Trailing Offset Distance (ATR)", minval = 0.1, step = 0.1, group = grp_tr)
+showTPSL      = input.bool(true, "Show Active TP / SL Lines", group = grp_tr)
+
+grp_time = "5. Session & Schedule Filter"
+useTimeFilter       = input.bool(true, "Enable Session Time Filter", group = grp_time)
+tzInput             = input.string("UTC+3", "Timezone", options = ["UTC+3", "UTC+0", "Europe/London", "America/New_York"], group = grp_time)
+wkdaySession        = input.session("0300-1500", "Weekday Trading Session", group = grp_time)
+wkendSession        = input.session("0100-1400", "Weekend Trading Session", group = grp_time)
+closeOutsideSession = input.bool(false, "Close Open Trades Outside Session", group = grp_time)
+showSessionBg       = input.bool(true, "Highlight Off-Session Hours", group = grp_time)
+
+grp_clr = "6. Visuals & Dashboard"
+upColor    = input.color(#00ffbb, "Long / TP2 Color", group = grp_clr)
+tp1Color   = input.color(#00bcd4, "TP1 Color", group = grp_clr)
+downColor  = input.color(#ff1100, "Short / Initial SL Color", group = grp_clr)
+trailColor = input.color(#ffeb3b, "Breakeven / Trailing SL Color", group = grp_clr)
+showTable  = input.bool(true, "Show Status Dashboard", group = grp_clr)
+
+// ==========================================
+// 2. SESSION CONTROL
+// ==========================================
+dow       = dayofweek(time, tzInput)
+isWeekend = dow == dayofweek.saturday or dow == dayofweek.sunday
+inWkday   = not na(time(timeframe.period, wkdaySession, tzInput))
+inWkend   = not na(time(timeframe.period, wkendSession, tzInput))
+inSession = useTimeFilter ? (isWeekend ? inWkend : inWkday) : true
+
+// ==========================================
+// 3. INDICATOR CALCULATIONS
+// ==========================================
+ema200  = ta.ema(close, emaLen)
+vwapVal = ta.vwap(hlc3)
+atrVal  = ta.atr(atrLen)
+
+midpointPrice = hl2
+amazingOsc    = ta.sma(midpointPrice, aoFast) - ta.sma(midpointPrice, aoSlow)
+rise          = ta.rma(math.max(ta.change(amazingOsc), 0), oscPeriod)
+fall          = ta.rma(-math.min(ta.change(amazingOsc), 0), oscPeriod)
+customRSI     = (fall == 0 ? 100 : rise == 0 ? 0 : 100 - (100 / (1 + rise / fall))) - 50
+
+// ==========================================
+// 4. SIGNAL & FILTER CONDITIONS
+// ==========================================
+allowLong  = useFilter ? (close > ema200 and close > vwapVal) : true
+allowShort = useFilter ? (close < ema200 and close < vwapVal) : true
+
+longCondition  = ta.crossover(customRSI, -30) and allowLong and inSession
+shortCondition = ta.crossunder(customRSI, 30) and allowShort and inSession
+
+// ==========================================
+// 5. POSITION & RISK MANAGEMENT
+// ==========================================
+var float entryPrice        = na
+var float activeSL          = na
+var float activeTP1         = na
+var float activeTP2         = na
+var float trailTrigger      = na
+var float trailOffset       = na
+var bool  tp1Hit            = false
+var bool  trailActivated    = false
+var int   entryClosedTrades = 0
+
+if strategy.position_size == 0
+    entryPrice        := na
+    activeSL          := na
+    activeTP1         := na
+    activeTP2         := na
+    trailTrigger      := na
+    trailOffset       := na
+    tp1Hit            := false
+    trailActivated    := false
+
+if closeOutsideSession and not inSession and strategy.position_size != 0
+    strategy.close_all(comment = "Session End")
+
+// Long Entry
+if longCondition and strategy.position_size == 0
+    slDist            = atrVal * slMult
+    entryPrice        := close
+    activeSL          := close - slDist
+    activeTP1         := usePartialTP ? close + (slDist * tp1Ratio) : na
+    activeTP2         := close + (slDist * tp2Ratio)
+    trailTrigger      := close + (atrVal * trailActMult)
+    trailOffset       := atrVal * trailDistMult
+    tp1Hit            := false
+    trailActivated    := false
+    entryClosedTrades := strategy.closedtrades
+    strategy.entry("Long", strategy.long)
+
+// Short Entry
+if shortCondition and strategy.position_size == 0
+    slDist            = atrVal * slMult
+    entryPrice        := close
+    activeSL          := close + slDist
+    activeTP1         := usePartialTP ? close - (slDist * tp1Ratio) : na
+    activeTP2         := close - (slDist * tp2Ratio)
+    trailTrigger      := close - (atrVal * trailActMult)
+    trailOffset       := atrVal * trailDistMult
+    tp1Hit            := false
+    trailActivated    := false
+    entryClosedTrades := strategy.closedtrades
+    strategy.entry("Short", strategy.short)
+
+// Long Management
+if strategy.position_size > 0
+    if usePartialTP and not tp1Hit and strategy.closedtrades > entryClosedTrades
+        tp1Hit := true
+        if moveSLToBE
+            activeSL := math.max(activeSL, entryPrice)
+
+    if useTrail
+        if high >= trailTrigger
+            trailActivated := true
+        if trailActivated
+            activeSL := math.max(activeSL, high - trailOffset)
+
+    if usePartialTP and not tp1Hit
+        strategy.exit("Long TP1", "Long", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL)
+    strategy.exit("Long TP2", "Long", limit = activeTP2, stop = activeSL)
+
+// Short Management
+if strategy.position_size < 0
+    if usePartialTP and not tp1Hit and strategy.closedtrades > entryClosedTrades
+        tp1Hit := true
+        if moveSLToBE
+            activeSL := math.min(activeSL, entryPrice)
+
+    if useTrail
+        if low <= trailTrigger
+            trailActivated := true
+        if trailActivated
+            activeSL := math.min(activeSL, low + trailOffset)
+
+    if usePartialTP and not tp1Hit
+        strategy.exit("Short TP1", "Short", qty_percent = tp1QtyPct, limit = activeTP1, stop = activeSL)
+    strategy.exit("Short TP2", "Short", limit = activeTP2, stop = activeSL)
+
+// ==========================================
+// 6. PLOTS & VISUALS
+// ==========================================
+plot(showLines ? ema200 : na, "EMA 200", color.new(#2962ff, 0), 2)
+plot(showLines ? vwapVal : na, "VWAP", color.new(#ff9800, 0), 2)
+
+bgcolor(useTimeFilter and not inSession and showSessionBg ? color.new(color.gray, 92) : na, title = "Off-Session Background")
+
+plotshape(longCondition and strategy.position_size[1] == 0, "Long Entry", shape.labelup, location.belowbar, upColor, text = "LONG", textcolor = color.black, size = size.small)
+plotshape(shortCondition and strategy.position_size[1] == 0, "Short Entry", shape.labeldown, location.abovebar, downColor, text = "SHORT", textcolor = color.white, size = size.small)
+
+slLineColor = (trailActivated or (tp1Hit and moveSLToBE)) ? trailColor : downColor
+plot(showTPSL and strategy.position_size != 0 and usePartialTP and not tp1Hit ? activeTP1 : na, "TP1 (Partial)", color.new(tp1Color, 15), 1, plot.style_linebr)
+plot(showTPSL and strategy.position_size != 0 ? activeTP2 : na, "TP2 (Target)", color.new(upColor, 15), 2, plot.style_linebr)
+plot(showTPSL and strategy.position_size != 0 ? activeSL : na, "Stop Loss", color.new(slLineColor, 10), 2, plot.style_linebr)
+
+// ==========================================
+// 7. STATUS DASHBOARD
+// ==========================================
+if showTable and barstate.islast
+    var table dash = table.new(position.top_right, 2, 4, bgcolor = color.new(#131722, 15), border_width = 1, border_color = color.new(color.gray, 70))
+    
+    sessText   = inSession ? "ACTIVE" : "OFF-SESSION"
+    sessColor  = inSession ? upColor : color.gray
+    
+    trendText  = allowLong ? "LONG BIAS ▲" : allowShort ? "SHORT BIAS ▼" : "NEUTRAL"
+    trendColor = allowLong ? upColor : allowShort ? downColor : color.gray
+    
+    tpStatus   = strategy.position_size == 0 ? "WAITING" : tp1Hit ? "TP1 HIT (50%) ✓" : "TARGETING TP1"
+    tpClr      = tp1Hit ? tp1Color : color.silver
+
+    trailText  = strategy.position_size == 0 ? "NO POSITION" : trailActivated ? "TRAILING ACTIVE ⚡" : (tp1Hit and moveSLToBE) ? "BREAKEVEN LOCKED 🔒" : "INITIAL SL"
+    trailClr   = (trailActivated or (tp1Hit and moveSLToBE)) ? trailColor : color.silver
+
+    table.cell(dash, 0, 0, "Session:", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 0, sessText, text_color = sessColor, text_size = size.small)
+
+    table.cell(dash, 0, 1, "Trend Filter:", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 1, trendText, text_color = trendColor, text_size = size.small)
+
+    table.cell(dash, 0, 2, "Partial TP:", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 2, tpStatus, text_color = tpClr, text_size = size.small)
+
+    table.cell(dash, 0, 3, "Stop Status:", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 3, trailText, text_color = trailClr, text_size = size.small)
