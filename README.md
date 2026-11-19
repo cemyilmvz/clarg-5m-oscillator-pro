@@ -5,7 +5,9 @@
 ![Timeframe](https://img.shields.io/badge/Timeframe-5m%20Scalping-00ffbb)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A 5-minute intraday and scalping trading strategy built in **Pine Script v5**. It combines a smoothed **Awesome Oscillator (AO) + RSI** momentum engine with dual institutional trend filters (**EMA 200 & VWAP**), dynamic **ATR-based risk management**, **Partial Take-Profit with automatic Breakeven**, and customizable **weekday/weekend session windows**.
+A 5-minute intraday and scalping trading strategy built in **Pine Script v5**. It combines a smoothed **Awesome Oscillator (AO) + RSI** momentum engine with dual institutional trend filters (**EMA 200 & VWAP**), dynamic **ATR-based risk management**, **Partial Take-Profit with automatic Breakeven**, customizable **weekday/weekend session windows**, and **JSON Webhook alerts** for automated execution.
+
+![Strategy Preview](assets/backtest-preview.png)
 
 ---
 
@@ -22,33 +24,30 @@ A 5-minute intraday and scalping trading strategy built in **Pine Script v5**. I
 * **ATR Trailing Stop:** Activates once price moves in favor by a configurable ATR threshold (`1.0x ATR` default) and trails behind price swings.
 * **Session & Schedule Filter:** Separate active trading windows for weekdays and weekends to avoid low-liquidity consolidation phases.
 * **Live On-Chart Dashboard:** Displays real-time session status, active trend bias, partial TP status, and stop-loss state.
+* **Webhook JSON Payloads:** Emits structured JSON messages for entries, partial exits, breakeven/trailing stops, and session closures.
 
 ---
 
-## Default Parameters
+## How Execution Works (Live Signals vs. Automation)
 
-| Category | Parameter | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **Oscillator** | Oscillator Length | `14` | RMA smoothing length optimized for 5m charts |
-| **Oscillator** | AO Fast / Slow | `5` / `34` | Awesome Oscillator SMA periods |
-| **Trend Filter** | Trend EMA Length | `200` | Baseline macro trend filter |
-| **Risk Management** | Initial Stop-Loss | `1.5x ATR` | Volatility-adjusted initial stop distance |
-| **Risk Management** | TP1 / TP2 Ratio | `1.5 R:R` / `3.0 R:R` | Partial exit and runner target levels |
-| **Trailing Stop** | Activation / Distance | `1.0x` / `1.2x ATR` | Trigger threshold and trailing offset |
-| **Session Filter** | Weekday / Weekend | `03:00-15:00` / `01:00-14:00` | Active trading hours (`UTC+3`) |
+This script runs directly on **TradingView** and does not place orders on an exchange by itself. It supports three workflows:
 
----
+1. **Real-Time Chart Signals:** Plots `LONG` / `SHORT` markers alongside dynamic `TP1`, `TP2`, and `SL` levels on the live 5m chart.
+2. **Manual Trading Alerts:** Create a TradingView alert on the strategy (`Order fills only`) to receive instant push/email notifications for manual execution.
+3. **Automated Bot Execution (Webhook):** Connect TradingView's Webhook URL to an execution engine (e.g., 3Commas, WunderTrading, or a custom Python webhook server) using `{{strategy.order.alert_message}}` in the alert message box.
 
-## Installation (TradingView)
+### Sample Webhook JSON Payloads
 
-1. Open **TradingView** and load a **5-minute (5m)** chart.
-2. Open the **Pine Editor** tab at the bottom of the screen.
-3. Copy the contents of `src/clarg_5m_pro_strategy.pine` and paste it into the editor.
-4. Click **Save** and then **Add to Chart**.
-5. Open the **Strategy Tester** tab to inspect historical backtest metrics and tune ATR multipliers for your specific asset.
-
----
-
-## Disclaimer
-
-*This repository is for educational and backtesting research purposes only. Algorithmic trading involves substantial risk of loss. Past backtest performance does not guarantee future live results.*
+**Entry Event:**
+```json
+{
+  "secret": "your_token",
+  "strategy": "Clarg 5m Pro",
+  "event": "ENTRY_LONG",
+  "symbol": "BTCUSDT",
+  "timeframe": "5",
+  "price": 92500.5,
+  "sl": 92120.0,
+  "tp1": 93071.2,
+  "tp2": 93642.0
+}
